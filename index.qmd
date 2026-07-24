@@ -6,57 +6,200 @@ date: last-modified
 lang: en
 ---
 
-```{r}
-#| label: setup
-#| include: false
-source(here::here("R", "analysis.R"))
-sources <- read_crop_sources()
-connection <- build_crop_database(sources)
-```
-
 ## Business question
 
-Canadian microbreweries and microdistilleries depend on grains whose availability and cost change across provinces and years. This project combines agricultural production, farm prices, and CAD/USD exchange rates in SQLite to demonstrate transparent, reusable SQL analysis.
+Canadian microbreweries and microdistilleries depend on grains whose availability and cost change across provinces and years. This notebook exposes the complete workflow: CSV ingestion, validation, SQLite construction, parameterized SQL, currency conversion, and visualization.
 
-## Data quality and database design
-
-The four snapshots contain annual crop observations, daily and monthly exchange rates, and monthly farm prices. Dates are parsed before loading, required columns are validated, and each render builds a temporary database instead of committing a binary database file.
+## Load packages
 
 ```{r}
-tibble::tibble(
+#| label: packages
+#| message: false
+#| warning: false
+library(DBI)
+library(dplyr)
+library(ggplot2)
+library(here)
+library(knitr)
+library(RSQLite)
+library(scales)
+library(tibble)
+```
+
+## Read and validate four sources
+
+```{r}
+#| label: read-data
+crop <- read.csv(here("data", "annual_crop.csv"), stringsAsFactors = FALSE)
+daily_fx <- read.csv(here("data", "daily_fx.csv"), stringsAsFactors = FALSE)
+monthly_fx <- read.csv(here("data", "monthly_fx.csv"), stringsAsFactors = FALSE)
+farm_prices <- read.csv(
+  here("data", "monthly_farm_prices.csv"),
+  stringsAsFactors = FALSE
+)
+
+crop$YEAR <- as.Date(crop$YEAR)
+crop$YEAR_NUMBER <- as.integer(format(crop$YEAR, "%Y"))
+daily_fx$DATE <- as.Date(daily_fx$DATE)
+monthly_fx$DATE <- as.Date(monthly_fx$DATE)
+farm_prices$DATE <- as.Date(farm_prices$DATE)
+
+required_crop_columns <- c(
+  "CD_ID", "YEAR", "CROP_TYPE", "GEO", "SEEDED_AREA",
+  "HARVESTED_AREA", "PRODUCTION", "AVG_YIELD"
+)
+required_fx_columns <- c("DFX_ID", "DATE", "FXUSDCAD")
+required_price_columns <- c(
+  "CD_ID", "DATE", "CROP_TYPE", "GEO", "PRICE_PRERMT"
+)
+
+stopifnot(
+  all(required_crop_columns %in% names(crop)),
+  all(required_fx_columns %in% names(daily_fx)),
+  all(required_fx_columns %in% names(monthly_fx)),
+  all(required_price_columns %in% names(farm_prices)),
+  nrow(crop) > 0,
+  nrow(daily_fx) > 0,
+  nrow(monthly_fx) > 0,
+  nrow(farm_prices) > 0,
+  anyDuplicated(crop$CD_ID) == 0
+)
+
+tibble(
   table = c("crop_data", "daily_fx", "monthly_fx", "farm_prices"),
-  records = c(nrow(sources$crop), nrow(sources$daily_fx), nrow(sources$monthly_fx), nrow(sources$prices))
+  records = c(
+    nrow(crop),
+    nrow(daily_fx),
+    nrow(monthly_fx),
+    nrow(farm_prices)
+  )
 ) |>
-  knitr::kable()
+  kable()
+```
+
+## Build SQLite during the render
+
+The database is temporary, so the repository stores transparent CSV snapshots rather than a binary database.
+
+```{r}
+#| label: build-database
+database_path <- tempfile(fileext = ".sqlite")
+connection <- dbConnect(SQLite(), database_path)
+
+dbWriteTable(connection, "crop_data", crop, overwrite = TRUE)
+dbWriteTable(connection, "daily_fx", daily_fx, overwrite = TRUE)
+dbWriteTable(connection, "monthly_fx", monthly_fx, overwrite = TRUE)
+dbWriteTable(connection, "farm_prices", farm_prices, overwrite = TRUE)
+
+dbListTables(connection)
 ```
 
 ## National production trends
 
+The crop names are passed as bound parameters rather than pasted into SQL.
+
 ```{r}
-trends <- national_crop_trends(connection)
-plot_crop_trends(trends, "en")
+#| label: production-query
+production_sql <- "
+  SELECT YEAR, CROP_TYPE, PRODUCTION
+  FROM crop_data
+  WHERE GEO = 'Canada'
+    AND CROP_TYPE IN (?, ?, ?)
+  ORDER BY YEAR, CROP_TYPE
+"
+
+production_trends <- dbGetQuery(
+  connection,
+  production_sql,
+  params = list("Barley", "Rye", "Wheat")
+)
+
+production_trends$YEAR <- as.Date(
+  production_trends$YEAR,
+  origin = "1970-01-01"
+)
 ```
 
-Production volume provides supply context, but it should not be interpreted as immediately available inventory for a specific buyer.
-
-## Which crops had the highest yield?
-
-The query below uses bound parameters for geography and year rather than constructing SQL from user-provided text.
-
 ```{r}
-top_crop_yields(connection, "Saskatchewan", 2000, limit = 6) |>
-  knitr::kable(col.names = c("Crop", "Average yield"))
+#| label: production-chart
+#| fig-alt: "Lines showing Canadian barley, rye, and wheat production over time."
+ggplot(
+  production_trends,
+  aes(x = YEAR, y = PRODUCTION, color = CROP_TYPE)
+) +
+  geom_line(linewidth = 0.8) +
+  scale_y_continuous(labels = label_number(scale_cut = cut_short_scale())) +
+  scale_color_viridis_d(end = 0.85) +
+  labs(
+    title = "Canadian crop production over time",
+    x = "Year",
+    y = "Production (metric tonnes)",
+    color = "Crop"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
 ```
 
-## Canola prices in two currencies
+## Highest yields in Saskatchewan
 
-Monthly farm prices are joined to monthly exchange rates on a shared date. Dividing the CAD price by CAD per USD converts the value to USD per metric tonne.
+Geography, year, and result count are all bound parameters.
 
 ```{r}
-canola_prices <- recent_canola_prices(connection)
+#| label: yield-query
+yield_sql <- "
+  SELECT
+    CROP_TYPE,
+    ROUND(AVG(AVG_YIELD), 1) AS average_yield
+  FROM crop_data
+  WHERE GEO = ? AND YEAR_NUMBER = ?
+  GROUP BY CROP_TYPE
+  ORDER BY average_yield DESC
+  LIMIT ?
+"
+
+top_yields <- dbGetQuery(
+  connection,
+  yield_sql,
+  params = list("Saskatchewan", 2000L, 6L)
+)
+
+top_yields |>
+  kable(col.names = c("Crop", "Average yield"))
+```
+
+## Canola prices in CAD and USD
+
+The query joins monthly prices and exchange rates by date. Dividing CAD per tonne by CAD per USD produces USD per tonne.
+
+```{r}
+#| label: price-query
+price_sql <- "
+  SELECT
+    p.DATE,
+    p.PRICE_PRERMT AS price_cad_per_tonne,
+    fx.FXUSDCAD,
+    ROUND(p.PRICE_PRERMT / fx.FXUSDCAD, 2) AS price_usd_per_tonne
+  FROM farm_prices p
+  INNER JOIN monthly_fx fx ON p.DATE = fx.DATE
+  WHERE p.CROP_TYPE = 'Canola' AND p.GEO = ?
+  ORDER BY p.DATE DESC
+  LIMIT ?
+"
+
+canola_prices <- dbGetQuery(
+  connection,
+  price_sql,
+  params = list("Saskatchewan", 12L)
+)
+
+canola_prices$DATE <- as.Date(canola_prices$DATE, origin = "1970-01-01")
+
 canola_prices |>
-  head(6) |>
-  knitr::kable(
+  slice_head(n = 6) |>
+  kable(
     col.names = c("Date", "CAD / tonne", "CAD per USD", "USD / tonne"),
     digits = 2
   )
@@ -64,16 +207,16 @@ canola_prices |>
 
 ## Decision notes
 
-- Compare long-run production with recent farm prices before choosing a grain.
-- Preserve geographic detail; national totals cannot describe provincial procurement conditions.
-- Treat exchange-rate conversion as a dated estimate, not a quoted transaction price.
-- Add transportation, quality specifications, and supplier contracts before making purchasing decisions.
+- Production volume provides supply context, not immediately available inventory.
+- Provincial detail matters for procurement decisions.
+- Currency conversion is a dated estimate, not a transaction quote.
+- Transportation, quality, and contracts remain outside this dataset.
+
+```{r}
+#| label: disconnect
+dbDisconnect(connection)
+```
 
 ## Conclusion
 
-SQLite makes the analytical transformations inspectable and repeatable. Parameterized queries, explicit units, and temporary database construction improve the original exercise while keeping its business focus.
-
-```{r}
-#| include: false
-DBI::dbDisconnect(connection)
-```
+The visible workflow demonstrates file validation, relational design, parameterized SQL, joins, unit-aware conversion, and business interpretation. See the [Spanish version](es/index.qmd).
