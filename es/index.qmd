@@ -1,0 +1,80 @@
+---
+title: "Producción agrícola canadiense para cervecerías y destilerías"
+subtitle: "Análisis SQL reproducible de producción, rendimiento, precios y tipo de cambio"
+author: "Miguelangel Palma Rojas"
+date: last-modified
+lang: es
+---
+
+```{r}
+#| label: setup
+#| include: false
+source(here::here("R", "analysis.R"))
+sources <- read_crop_sources()
+connection <- build_crop_database(sources)
+```
+
+## Pregunta de negocio
+
+Las microcervecerías y microdestilerías canadienses dependen de granos cuya disponibilidad y precio varían entre provincias y años. Este proyecto integra producción, precios agrícolas y tipos de cambio CAD/USD en SQLite mediante un análisis transparente y reutilizable.
+
+## Calidad de datos y diseño
+
+Los cuatro snapshots incluyen observaciones agrícolas anuales, tipos de cambio diarios y mensuales, y precios agrícolas mensuales. Las fechas se convierten antes de cargar los datos, se validan las columnas y cada render crea una base temporal.
+
+```{r}
+tibble::tibble(
+  tabla = c("crop_data", "daily_fx", "monthly_fx", "farm_prices"),
+  registros = c(nrow(sources$crop), nrow(sources$daily_fx), nrow(sources$monthly_fx), nrow(sources$prices))
+) |>
+  knitr::kable()
+```
+
+## Tendencias nacionales
+
+```{r}
+trends <- national_crop_trends(connection)
+plot_crop_trends(trends, "es")
+```
+
+La producción ofrece contexto de suministro, pero no representa inventario inmediatamente disponible para un comprador.
+
+## ¿Qué cultivos tuvieron mayor rendimiento?
+
+La consulta usa parámetros vinculados para la geografía y el año, evitando construir SQL con texto suministrado externamente.
+
+```{r}
+top_crop_yields(connection, "Saskatchewan", 2000, limit = 6) |>
+  knitr::kable(col.names = c("Cultivo", "Rendimiento promedio"))
+```
+
+## Precio de canola en dos monedas
+
+Los precios se unen al tipo de cambio mensual por fecha. Dividir el precio en CAD por la cantidad de CAD por USD produce una estimación en USD por tonelada métrica.
+
+```{r}
+canola_prices <- recent_canola_prices(connection)
+canola_prices |>
+  head(6) |>
+  knitr::kable(
+    col.names = c("Fecha", "CAD / tonelada", "CAD por USD", "USD / tonelada"),
+    digits = 2
+  )
+```
+
+## Notas para la decisión
+
+- Comparar la producción histórica con los precios recientes.
+- Conservar el detalle geográfico; los totales nacionales no describen cada provincia.
+- Tratar la conversión de moneda como estimación fechada.
+- Incorporar transporte, calidad y contratos antes de tomar decisiones de compra.
+
+## Conclusión
+
+SQLite permite inspeccionar y repetir las transformaciones. Las consultas parametrizadas, unidades explícitas y creación temporal de la base mejoran el ejercicio original sin perder su enfoque empresarial.
+
+```{r}
+#| include: false
+DBI::dbDisconnect(connection)
+```
+
