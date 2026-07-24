@@ -118,6 +118,10 @@ production_trends$YEAR <- as.Date(
   production_trends$YEAR,
   origin = "1970-01-01"
 )
+
+latest_production <- production_trends |>
+  filter(YEAR == max(YEAR)) |>
+  slice_max(PRODUCTION, n = 1, with_ties = FALSE)
 ```
 
 ```{r}
@@ -219,4 +223,9 @@ dbDisconnect(connection)
 
 ## Conclusión
 
-El flujo visible demuestra validación de archivos, diseño relacional, SQL parametrizado, uniones, conversión con unidades e interpretación de negocio. Consulta la [versión en inglés](../index.qmd).
+- Dentro de las tres series nacionales, `r latest_production$CROP_TYPE[[1]]` registra la mayor producción en `r format(latest_production$YEAR[[1]], "%Y")`, con `r format(latest_production$PRODUCTION[[1]], big.mark = ".", decimal.mark = ",", scientific = FALSE)` toneladas métricas. Este es el principal indicador de volumen del último año compartido.
+- La consulta parametrizada para Saskatchewan ubica a `r top_yields$CROP_TYPE[[1]]` en primer lugar durante 2000, con un rendimiento promedio de `r format(top_yields$average_yield[[1]], big.mark = ".", decimal.mark = ",")` en las unidades de rendimiento reportadas por la fuente.
+- En `r format(canola_prices$DATE[[1]], "%B de %Y")`, la canola cuesta `r sprintf("%.2f", canola_prices$price_cad_per_tonne[[1]])` CAD por tonelada. Con una tasa de `r sprintf("%.4f", canola_prices$FXUSDCAD[[1]])` CAD por USD, la estimación unida es `r sprintf("%.2f", canola_prices$price_usd_per_tonne[[1]])` USD por tonelada.
+- Los resultados permiten monitorear oferta y exposición cambiaria, pero no decidir una compra de forma aislada: faltan transporte, grado de calidad, contratos y riesgo de base.
+
+Consulta la [versión en inglés](../index.qmd).
